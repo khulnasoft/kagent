@@ -1,0 +1,95 @@
+on:
+  push:
+    tags:
+      - v*
+    branches:
+      - master
+  pull_request: null
+name: Test and Deploy
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        go-version: [1.23.x]
+        platform: [ubuntu-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Go mod download
+        run: go mod download
+      - name: Compile
+        run: |
+          CGO_ENABLED=0 go build -o /tmp/kagent github.com/khulnasoft/kagent/cmd/kagent
+          /tmp/kagent --help || true
+      - name: Enforce formatted code
+        run: "! go fmt ./... 2>&1 | read"
+      - name: Go vet
+        run: go vet ./...
+      - name: Go test
+        run: go test ./... -race -count=1
+      - name: Golangci-lint
+        uses: reviewdog/action-golangci-lint@v2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          reporter: github-pr-check
+  deploy:
+    needs: [test]
+    name: Build and deploy Docker images
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')) &&
+      github.repository == 'khulnasoft/agent-service-discovery'
+    env:
+      DOCKER_CLI_EXPERIMENTAL: enabled  # for 'docker buildx'
+      DOCKER_USER: ${{secrets.DOCKER_USERNAME}}
+      DOCKER_TOKEN: ${{secrets.DOCKER_TOKEN}}
+      DOCKER_REPO: khulnasoft/agent-kagent
+      DOCKER_PLATFORMS: >
+        linux/amd64
+        linux/arm/v7
+        linux/arm64
+    steps:
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up image tag
+        run: |
+          set -vx
+          # Export environment variable for later stages.
+          if echo "$GITHUB_REF" | grep -q '^refs/heads/'; then
+            # Pushes to (master) branch - deploy 'latest'.
+            echo "TAG=latest" >> $GITHUB_ENV
+          elif echo "$GITHUB_REF" | grep -q '^refs/tags/'; then
+            # Pushes tag - deploy tag name.
+            echo "TAG=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_ENV
+          fi
+          echo "DOCKER_BASE=${DOCKER_REPO}" >> $GITHUB_ENV
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Docker login
+        run: echo "$DOCKER_TOKEN" | docker login -u="$DOCKER_USER" --password-stdin
+      - name: Build multi-architecture Docker images with buildx
+        run: |
+          set -vx
+          function buildx() {
+            docker buildx build \
+              --platform ${DOCKER_PLATFORMS// /,} \
+              --push \
+              "$@" \
+              .
+          }
+          buildx -t "$DOCKER_BASE:$TAG"
+      - name: Docker logout
+        run: docker logout

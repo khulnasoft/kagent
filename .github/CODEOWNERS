@@ -1,0 +1,7 @@
+* @khulnasoft-bot
+
+# CI/CD
+.github/ @khulnasoft-bot
+
+# Documentation
+*.md @khulnasoft-bot
