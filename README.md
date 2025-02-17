@@ -1,1 +1,1 @@
-# agent-service-discovery
+# Service discovery
